@@ -1,0 +1,48 @@
+Splunk alert SPL with baked-in powershell with groups to remove when the alert fires
+
+index=blah sourcetype=blah earliest=-24h
+| dedup Username
+| eval epochDate=strptime(TerminationDate,"%Y-%m-%d")
+| eval cDate=now()
+| eval DaysDiff = round(((cDate - epochDate)/86400)-1,0)
+| join Username type=outer
+    [search index=summary_ldap extensionAttribute5=* earliest=-7h
+    | dedup identity
+    | search NOT distinguishedName="*legal*"
+    | rex field=distinguishedName "\bOU=(?<distinguishedName>\w+)"
+    | rename user as garbage
+    | rename id as user
+    | table identity nick Username endDate userAccountControl distinguishedName extensionAttribute5 memberOf EmailHold]
+```_```
+| rex field=memberOf max_match=0 "CN=(?<memberOf>[^,$]*)"
+| eval O365-1 = if(in(memberOf, "O365-1"), "X" , " ")
+| eval O365-2 = if(in(memberOf, "O365-2"), "X"," ")
+| eval O365-3 = if(in(memberOf, "O365-3"), "X"," ")
+| eval EmailHold = if(in(memberOf, "ER_EmailHold_Users"), "YES" , "NO")
+```_```
+| search O365-1="X" OR O365-2="X" OR O365-3="X" AND EmailHold="NO" AND DaysDiff IN (8,9,10,11,12,13)
+```_```
+
+```Powershell Addition```
+| eval powershell_auto = " -Confirm:$false"
+
+``` O365-1 powershell script```
+| eval powershell_heavy = "Remove-ADGroupMember -Identity O365-1 -Members "
+| eval Script_heavy=powershell_heavy.Username.powershell_auto
+
+``` O365-2 powershell script```
+| eval powershell_f3d = "Remove-ADGroupMember -Identity O365-2 -Members "
+| eval Script_f3d=powershell_f3d.Username.powershell_auto
+
+``` O365-3 powershell script```
+| eval powershell_f3d_no_mail = "Remove-ADGroupMember -Identity O365-3 -Members "
+| eval Script_f3d_no_mail=powershell_f3d_no_mail.Username.powershell_auto
+
+```_```
+| eval Script=if('O365-1'="X", Script_heavy, if('O365-3'="X", Script_f3d_no_mail, Script_f3d))
+```_```
+| table Employee Username TerminationDate DaysDiff Script "O365-1" "O365-2" "O365-3" userAccountControl distinguishedName cDate epochDate EmailHold
+| rename nick as displayName, userAccountControl as "AD Status", endDate as "AD Expiration", distinguishedName as OU, DaysDiff as "Days Terminated"
+| replace "NORMAL_ACCOUNT" with Active , "*ACCOUNTDISABLE*" with Disabled
+| fields - cDate,epochDate, memberOf
+| sort by "O365-3", "O365-2", "O365-1",
